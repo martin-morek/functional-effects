@@ -13,7 +13,8 @@ object AccessEnvironment extends App {
    * Using `ZIO.access`, access a `Config` type from the environment, and
    * extract the `server` field from it.
    */
-  val accessServer: ZIO[Config, Nothing, String] = ???
+  val accessServer: ZIO[Config, Nothing, String] =
+    ZIO.access(_.server)
 
   /**
    * EXERCISE
@@ -21,7 +22,8 @@ object AccessEnvironment extends App {
    * Using `ZIO.access`, access a `Config` type from the environment, and
    * extract the `port` field from it.
    */
-  val accessPort: ZIO[Config, Nothing, Int] = ???
+  val accessPort: ZIO[Config, Nothing, Int] =
+    ZIO.access(_.port)
 
   def run(args: List[String]) = {
     val config = Config("localhost", 7878)
@@ -58,9 +60,13 @@ object ProvideEnvironment extends App {
    * be composed because their environment types will be compatible.
    */
   def run(args: List[String]) = {
-    val config = Config("localhost", 7878)
+    val config             = Config("localhost", 7878)
+    val databaseConnection = DatabaseConnection()
 
-    ???
+    (for {
+      _ <- getServer.provide(config)
+      _ <- useDatabaseConnection.provide(databaseConnection)
+    } yield ()).exitCode
   }
 }
 
@@ -103,9 +109,20 @@ object CakeEnvironment extends App {
    * (`Files with Logging`).
    */
   def run(args: List[String]) =
-    effect
-      .provide(???)
-      .exitCode
+    effect.provide {
+      new Files with Logging {
+        val files: Files.Service =
+          new Files.Service {
+            def read(file: String): IO[IOException, String] =
+              IO(scala.io.Source.fromFile(file).getLines().mkString("\n")).refineToOrDie[IOException]
+          }
+        val logging: Logging.Service =
+          new Logging.Service {
+            def log(line: String): UIO[Unit] =
+              UIO(println(line))
+          }
+      }
+    }.exitCode
 }
 
 /**
@@ -136,7 +153,8 @@ object HasMap extends App {
    * Using the `++` operator on `Has`, combine the three maps (`hasLogging`, `hasDatabase`, and
    * `hasCache`) into a single map that has all three objects.
    */
-  val allThree: Has[Database] with Has[Cache] with Has[Logging] = ???
+  val allThree: Has[Database] with Has[Cache] with Has[Logging] =
+    hasLogging ++ hasDatabase ++ hasCache
 
   /**
    * EXERCISE
@@ -146,9 +164,9 @@ object HasMap extends App {
    * parameter, as it cannot be inferred (the map needs to know which of the objects you want to
    * retrieve, and that can be specified only by type).
    */
-  lazy val logging  = ???
-  lazy val database = ???
-  lazy val cache    = ???
+  lazy val logging  = allThree.get[Logging]
+  lazy val database = allThree.get[Database]
+  lazy val cache    = allThree.get[Cache]
 
   def run(args: List[String]) = ???
 }
@@ -187,7 +205,13 @@ object LayerEnvironment extends App {
      * Using `ZLayer.succeed`, create a layer that implements the `Files`
      * service.
      */
-    val live: ZLayer[Blocking, Nothing, Files] = ???
+    val live: ZLayer[Blocking, Nothing, Files] =
+      ZLayer.succeed {
+        new Service {
+          def read(file: String): IO[IOException, String] =
+            IO(scala.io.Source.fromFile(file).getLines().mkString("\n")).refineToOrDie[IOException]
+        }
+      }
 
     def read(file: String) = ZIO.accessM[Files](_.get.read(file))
   }
@@ -204,7 +228,13 @@ object LayerEnvironment extends App {
      * Using `ZLayer.fromFunction`, create a layer that requires `Console`
      * and uses the console to provide a logging service.
      */
-    val live: ZLayer[Console, Nothing, Logging] = ???
+    val live: ZLayer[Console, Nothing, Logging] =
+      ZLayer.fromFunction { console =>
+        new Service {
+          def log(line: String): UIO[Unit] =
+            console.get.putStrLn(line)
+        }
+      }
 
     def log(line: String) = ZIO.accessM[Logging](_.get.log(line))
   }
@@ -225,7 +255,7 @@ object LayerEnvironment extends App {
      * (`Files with Logging`).
      */
     val env: ZLayer[Console, Nothing, Files with Logging] =
-      ???
+      (Blocking.live >>> Files.live) ++ Logging.live
 
     effect
       .provideCustomLayer(env)
