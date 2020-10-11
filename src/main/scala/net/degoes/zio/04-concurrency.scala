@@ -16,7 +16,12 @@ object ForkJoin extends App {
    * and finally, print out a message "Joined".
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    printer.exitCode
+    for {
+      fiber <- printer.fork
+      _     <- putStrLn("Forked")
+      _     <- fiber.join
+      _     <- putStrLn("Joined")
+    } yield ExitCode.success
 }
 
 object ForkInterrupt extends App {
@@ -35,7 +40,13 @@ object ForkInterrupt extends App {
    * finally, print out a message "Interrupted".
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    (infinitePrinter *> ZIO.sleep(10.millis)).exitCode
+    for {
+      fiber <- infinitePrinter.fork
+      _     <- putStrLn("Forked")
+      _     <- ZIO.sleep(100.milliseconds)
+      _     <- fiber.interrupt
+      _     <- putStrLn("Interrupted")
+    } yield ExitCode.success
 }
 
 object ParallelFib extends App {
@@ -51,7 +62,11 @@ object ParallelFib extends App {
       if (n <= 1) UIO(n)
       else
         UIO.effectSuspendTotal {
-          (loop(n - 1, original) zipWith loop(n - 2, original))(_ + _)
+          for {
+            fiber <- loop(n - 1, original).fork
+            m     <- loop(n - 2, original)
+            n     <- fiber.join
+          } yield m + n
         }
 
     loop(n, n)
@@ -100,7 +115,13 @@ object AlarmAppImproved extends App {
    * prints out a wakeup alarm message, like "Time to wakeup!!!".
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    (for {
+      duration <- getAlarmDuration
+      fiber    <- putStrLn(".").repeat(Schedule.spaced(1.second)).fork
+      _        <- ZIO.sleep(duration)
+      _        <- fiber.interrupt
+      _        <- putStrLn("Time to wakeup!!!")
+    } yield ()).exitCode
 }
 
 /**
@@ -149,7 +170,17 @@ object ComputePi extends App {
    * ongoing estimates continuously until the estimation is complete.
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    for {
+      inside <- Ref.make(0L)
+      total  <- Ref.make(0L)
+      _ <- randomPoint.flatMap {
+            case (x, y) =>
+              if (insideCircle(x, y)) inside.update(_ + 1) *> total.update(_ + 1)
+              else total.update(_ + 1)
+          }.forever.fork
+      _ <- inside.get.zipWith(total.get)(estimatePi).flatMap(pi => putStrLn(pi.toString)).forever.fork
+      _ <- getStrLn.orDie
+    } yield ExitCode.success
 }
 
 object ParallelZip extends App {
@@ -285,9 +316,14 @@ object StmLunchTime extends App {
   final case class Attendee(state: TRef[Attendee.State]) {
     import Attendee.State._
 
-    def isStarving: STM[Nothing, Boolean] = ???
+    def isStarving: STM[Nothing, Boolean] =
+      state.get.map {
+        case Starving => true
+        case Full     => false
+      }
 
-    def feed: STM[Nothing, Unit] = ???
+    def feed: STM[Nothing, Unit] =
+      state.set(Full)
   }
   object Attendee {
     sealed trait State
@@ -312,9 +348,11 @@ object StmLunchTime extends App {
         }
         .map(_._2)
 
-    def takeSeat(index: Int): STM[Nothing, Unit] = ???
+    def takeSeat(index: Int): STM[Nothing, Unit] =
+      seats.update(index, _ => true)
 
-    def vacateSeat(index: Int): STM[Nothing, Unit] = ???
+    def vacateSeat(index: Int): STM[Nothing, Unit] =
+      seats.update(index, _ => false)
   }
 
   /**
@@ -322,7 +360,11 @@ object StmLunchTime extends App {
    *
    * Using STM, implement a method that feeds a single attendee.
    */
-  def feedAttendee(t: Table, a: Attendee): STM[Nothing, Unit] = ???
+  def feedAttendee(t: Table, a: Attendee): STM[Nothing, Unit] =
+    t.findEmptySeat.flatMap {
+      case Some(index) => t.takeSeat(index) *> a.feed *> t.vacateSeat(index)
+      case None        => STM.retry
+    }
 
   /**
    * EXERCISE
@@ -330,7 +372,9 @@ object StmLunchTime extends App {
    * Using STM, implement a method that feeds only the starving attendees.
    */
   def feedStarving(table: Table, attendees: Iterable[Attendee]): UIO[Unit] =
-    ???
+    ZIO.foreachPar_(attendees) { attendee =>
+      feedAttendee(table, attendee).whenM(attendee.isStarving).commit
+    }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] = {
     val Attendees = 100
@@ -441,20 +485,73 @@ object StmReentrantLock extends App {
    * Using STM, implement a reentrant read/write lock.
    */
   class ReentrantReadWriteLock(data: TRef[Either[ReadLock, WriteLock]]) {
-    def writeLocks: UIO[Int] = ???
+    def writeLocks: UIO[Int] =
+      data.get.map {
+        case Right(writeLock) => writeLock.writeCount
+        case _                => 0
+      }.commit
 
-    def writeLocked: UIO[Boolean] = ???
+    def writeLocked: UIO[Boolean] =
+      writeLocks.map(_ > 0)
 
-    def readLocks: UIO[Int] = ???
+    def readLocks: UIO[Int] =
+      data.get.map {
+        case Left(readLock)   => readLock.total
+        case Right(writeLock) => writeLock.readCount
+      }.commit
 
-    def readLocked: UIO[Boolean] = ???
+    def readLocked: UIO[Boolean] =
+      readLocks.map(_ > 0)
 
-    val read: Managed[Nothing, Int] = ???
+    val read: Managed[Nothing, Int] = {
+      val acquireRead: UIO[Int] =
+        ZIO.fiberId.flatMap { fiberId =>
+          data.modify {
+            case Left(readLock) =>
+              val newReadLock = readLock.adjust(fiberId, 1)
+              (newReadLock.total, Left(newReadLock))
+            case Right(writeLock) =>
+              val newWriteLock = writeLock.copy(readCount = writeLock.readCount + 1)
+              (newWriteLock.readCount, Right(newWriteLock))
+          }.commit
+        }
+      val releaseRead: UIO[Unit] =
+        ZIO.fiberId.flatMap { fiberId =>
+          data.update {
+            case Left(readLock)   => Left(readLock.adjust(fiberId, -1))
+            case Right(writeLock) => Right(writeLock.copy(readCount = writeLock.readCount - 1))
+          }.commit
+        }
+      Managed.make(acquireRead)(_ => releaseRead)
+    }
 
-    val write: Managed[Nothing, Int] = ???
+    val write: Managed[Nothing, Int] = {
+      val acquireWrite: UIO[Int] =
+        ZIO.fiberId.flatMap { fiberId =>
+          data.get.flatMap {
+            case Left(readLock) if readLock.noOtherHolder(fiberId) =>
+              data.set(Right(WriteLock(1, 1, fiberId))) as 1
+            case Right(writeLock) if writeLock.fiberId == fiberId =>
+              data.set(Right(writeLock.copy(writeCount = writeLock.writeCount + 1))) as (writeLock.writeCount + 1)
+            case _ => STM.retry
+          }.commit
+        }
+      val releaseWrite: UIO[Unit] =
+        ZIO.fiberId.flatMap { fiberId =>
+          data.get.flatMap {
+            case Right(WriteLock(1, readCount, fiberId)) =>
+              data.set(Left(ReadLock(fiberId, readCount)))
+            case Right(WriteLock(writeCount, readCount, fiberId)) if writeCount > 1 =>
+              data.set(Right(WriteLock(writeCount - 1, readCount, fiberId)))
+            case s => STM.dieMessage(s"fiber $fiberId is releasing a write lock it does not hold")
+          }.commit
+        }
+      Managed.make(acquireWrite)(_ => releaseWrite)
+    }
   }
   object ReentrantReadWriteLock {
-    def make: UIO[ReentrantReadWriteLock] = ???
+    def make: UIO[ReentrantReadWriteLock] =
+      TRef.makeCommit[Either[ReadLock, WriteLock]](Left(ReadLock.empty)).map(new ReentrantReadWriteLock(_))
   }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] = ???
@@ -484,7 +581,10 @@ object StmDiningPhilosophers extends App {
     left: TRef[Option[Fork]],
     right: TRef[Option[Fork]]
   ): STM[Nothing, (Fork, Fork)] =
-    ???
+    left.get.zip(right.get).flatMap {
+      case (Some(l), Some(r)) => left.set(None).zip(right.set(None)).as((l, r))
+      case _                  => STM.retry
+    }
 
   /**
    * EXERCISE
@@ -493,7 +593,14 @@ object StmDiningPhilosophers extends App {
    */
   def putForks(left: TRef[Option[Fork]], right: TRef[Option[Fork]])(
     tuple: (Fork, Fork)
-  ): STM[Nothing, Unit] = ???
+  ): STM[Nothing, Unit] =
+    left.get
+      .zip(right.get)
+      .flatMap {
+        case (None, None) => left.set(Some(tuple._1)).zip(right.set(Some(tuple._2)))
+        case _            => STM.retry
+      }
+      .ignore
 
   def setupTable(size: Int): ZIO[Any, Nothing, Roundtable] = {
     val makeFork = TRef.make[Option[Fork]](Some(Fork))

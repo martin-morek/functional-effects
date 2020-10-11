@@ -15,7 +15,8 @@ object PoolLocking extends App {
    * Using `ZIO#lock`, write an `onDatabase` combinator that runs the
    * specified effect on the database thread pool.
    */
-  def onDatabase[R, E, A](zio: ZIO[R, E, A]): ZIO[R, E, A] = ???
+  def onDatabase[R, E, A](zio: ZIO[R, E, A]): ZIO[R, E, A] =
+    zio.lock(dbPool)
 
   /**
    * EXERCISE
@@ -34,7 +35,7 @@ object PoolLocking extends App {
       println(s"Thread($id, $name, $groupName)")
     }
 
-    zio
+    ZIO.bracket(log)(_ => log)(_ => zio)
   }
 
   /**
@@ -72,7 +73,14 @@ object Sharding extends App {
     queue: Queue[A],
     n: Int,
     worker: A => ZIO[R, E, Unit]
-  ): ZIO[R, Nothing, E] = ???
+  ): ZIO[R, Nothing, E] =
+    for {
+      promise <- Promise.make[Nothing, E]
+      _ <- ZIO.forkAll(
+            ZIO.replicate(n)(queue.take.flatMap(worker).forever.tapError(e => queue.shutdown *> promise.succeed(e)))
+          )
+      e <- promise.await
+    } yield e
 
   def run(args: List[String]) = {
     def makeWorker(ref: Ref[Int]): Int => ZIO[Console, String, Unit] =
@@ -94,7 +102,7 @@ object Sharding extends App {
   }
 }
 
-object parallel_web_crawler {
+object parallel_web_crawler extends App {
   import zio.blocking._
   import zio.console._
   import zio.duration._
@@ -112,7 +120,13 @@ object parallel_web_crawler {
      * Implement a layer for `Web` that uses the `effectBlockingIO` combinator
      * to safely wrap `Source.fromURL` into a functional effect.
      */
-    val live: ZLayer[Blocking, Nothing, Web] = ???
+    val live: ZLayer[Blocking, Nothing, Web] =
+      ZLayer.fromService { blocking =>
+        new Service {
+          def getURL(url: URL): IO[Exception, String] =
+            blocking.effectBlocking(scala.io.Source.fromURL(url.url).getLines().mkString("\n")).refineToOrDie[Exception]
+        }
+      }
   }
 
   /**
@@ -120,7 +134,8 @@ object parallel_web_crawler {
    *
    * Using `ZIO.accessM`, delegate to the `Web` module's `getURL` function.
    */
-  def getURL(url: URL): ZIO[Web, Exception, String] = ???
+  def getURL(url: URL): ZIO[Web, Exception, String] =
+    ZIO.accessM(_.get.getURL(url))
 
   final case class CrawlState[+E](visited: Set[URL], errors: List[E]) {
     final def visitAll(urls: Set[URL]): CrawlState[E] = copy(visited = visited ++ urls)
@@ -147,7 +162,19 @@ object parallel_web_crawler {
 
     def loop(seeds: Set[URL], ref: Ref[CrawlState[E]]): ZIO[Web with Clock, Nothing, Unit] =
       if (seeds.isEmpty) ZIO.unit
-      else ???
+      else
+        ZIO.foreachPar_(seeds.flatMap(router)) { url =>
+          for {
+            html <- getURL(url).orDie
+            urls = extractURLs(url, html)
+            e    <- processor(url, html).fold(e => Some(e), _ => None)
+            seen <- ref.modify { crawlState =>
+                     val updated = crawlState.visitAll(urls.toSet)
+                     (crawlState.visited, e.fold(updated)(updated.logError))
+                   }
+            _ <- loop(urls.toSet -- seen, ref)
+          } yield ()
+        }
 
     for {
       ref   <- Ref.make[CrawlState[E]](CrawlState(seeds, Nil))
@@ -230,7 +257,16 @@ object parallel_web_crawler {
      *
      * Implement a test layer using the SiteIndex data.
      */
-    val testLayer: ZLayer[Any, Nothing, Web] = ???
+    val testLayer: ZLayer[Any, Nothing, Web] =
+      ZLayer.succeed {
+        new Web.Service {
+          def getURL(url: URL): IO[Exception, String] =
+            SiteIndex.get(url) match {
+              case Some(html) => ZIO.succeed(html)
+              case None       => ZIO.succeed("")
+            }
+        }
+      }
 
     val TestRouter: URL => Set[URL] =
       url => if (url.parsed.apexDomain == Some("zio.dev")) Set(url) else Set()
@@ -246,5 +282,7 @@ object parallel_web_crawler {
    * it needs.
    */
   def run(args: List[String]) =
-    putStrLn("Hello World!").exitCode
+    crawl(Set(test.Home), test.TestRouter, (url, string) => test.Processor(url, string).ignore)
+      .provideCustomLayer(test.testLayer)
+      .exitCode
 }
