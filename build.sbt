@@ -1,11 +1,11 @@
-val ZIOVersion = "1.0.1"
+val ZIOVersion = "1.0.3"
 
 lazy val root = project
   .in(file("."))
   .settings(
-    name := "zio-intro-game",
+    name := "functional-effects",
     organization := "net.degoes",
-    scalaVersion := "2.12.11",
+    scalaVersion := "2.12.12",
     initialCommands in Compile in console :=
       """|import zio._
          |import zio.console._
