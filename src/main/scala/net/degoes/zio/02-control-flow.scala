@@ -13,7 +13,8 @@ object Looping extends App {
    * Implement a `repeat` combinator using `flatMap` (or `zipRight`) and recursion.
    */
   def repeat[R, E, A](n: Int)(effect: ZIO[R, E, A]): ZIO[R, E, Chunk[A]] =
-    ???
+    if (n <= 0) effect.map(i => Chunk(i))
+    else effect.map(i => Chunk(i)) *> repeat(n - 1)(effect)
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
     repeat(100)(putStrLn("All work and no play makes Jack a dull boy")).exitCode
@@ -37,8 +38,8 @@ object Interview extends App {
    */
   def getAllAnswers(questions: List[String]): ZIO[Console, IOException, List[String]] =
     questions match {
-      case Nil     => ???
-      case q :: qs => ???
+      case Nil     => ZIO.succeed(List.empty)
+      case q :: qs => putStrLn(q) *> getStrLn.flatMap(res => getAllAnswers(qs).map(_.:+(q + " : " + res)))
     }
 
   /**
@@ -48,7 +49,10 @@ object Interview extends App {
    * `questions`, to ask the user a bunch of questions, and print the answers.
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    (for {
+      answers <- getAllAnswers(questions)
+      _       <- ZIO.foreach(answers)(putStrLn(_))
+    } yield ()).exitCode
 }
 
 object InterviewGeneric extends App {
@@ -68,12 +72,14 @@ object InterviewGeneric extends App {
    */
   def iterateAndCollect[R, E, A, B](as: List[A])(f: A => ZIO[R, E, B]): ZIO[R, E, List[B]] =
     as match {
-      case Nil     => ???
-      case a :: as => ???
+      case Nil     => ZIO.succeed(List())
+      case a :: as => f(a).flatMap(r => iterateAndCollect(as)(f).map(_ :+ r))
     }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    (for {
+      q <- iterateAndCollect(questions)(q => putStrLn(q))
+    } yield ()).exitCode
 }
 
 object InterviewForeach extends App {
@@ -94,7 +100,10 @@ object InterviewForeach extends App {
    * out the contents of the collection.
    */
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    ???
+    (for {
+      answers <- ZIO.foreach(questions)(putStrLn(_) *> getStrLn)
+      _       <- ZIO.foreach(answers)(putStrLn(_))
+    } yield ()).exitCode
 }
 
 object WhileLoop extends App {
@@ -106,7 +115,11 @@ object WhileLoop extends App {
    * Implement the functional effect version of a while loop.
    */
   def whileLoop[R, E, A](cond: UIO[Boolean])(zio: ZIO[R, E, A]): ZIO[R, E, Chunk[A]] =
-    ???
+    for {
+      c      <- cond
+      effect <- zio
+      chunk  <- if (c) whileLoop(cond)(zio).map(_ :+ effect) else ZIO.succeed(Chunk.empty)
+    } yield chunk
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] = {
     def loop(variable: Ref[Int]) =
@@ -135,12 +148,13 @@ object Iterate extends App {
    * evaluates to false, returning the "last" value of type `A`.
    */
   def iterate[R, E, A](start: A)(cond: A => Boolean)(f: A => ZIO[R, E, A]): ZIO[R, E, A] =
-    ???
+    if (cond(start))
+      f(start).flatMap(next => iterate(next)(cond)(f))
+    else
+      f(start)
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
-    iterate(0)(_ < 100) { i =>
-      putStrLn(s"At iteration: ${i}").as(i + 1)
-    }.exitCode
+    iterate(0)(_ < 100)(i => putStrLn(s"At iteration: ${i}").as(i + 1)).exitCode
 }
 
 object TailRecursive extends App {
