@@ -78,7 +78,7 @@ object InterviewGeneric extends App {
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, ExitCode] =
     (for {
-      q <- iterateAndCollect(questions)(q => putStrLn(q))
+      _ <- iterateAndCollect(questions)(q => putStrLn(q))
     } yield ()).exitCode
 }
 
